@@ -3,13 +3,14 @@ MCE — Proxy Server
 FastAPI-based JSON-RPC reverse proxy. Orchestrates the full MCE pipeline:
 
   Cache Check → Forward to MCP → Economist Evaluation →
-  Squeeze Engine → Policy Engine → Return Minified Response
+  Squeeze Engine → Policy Engine → Intelligence Layer → Return Minified Response
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import time
 from contextlib import asynccontextmanager
 from typing import Any, Optional
 
@@ -49,7 +50,7 @@ class ProxyServer:
     def __init__(self, config: MCEConfig):
         self.config = config
 
-        # ── Components ────────────────────────
+        # ── Core Components ───────────────────
         self.mcp_client = MCPClient(config.upstream_servers)
         self.economist = TokenEconomist(config.token_limits)
         self.policy = PolicyEngine(config.policy)
@@ -74,11 +75,20 @@ class ProxyServer:
             else None
         )
 
+        # ── Intelligence Layer ────────────────
+        self._session_ledger = None
+        self._memvault = None
+        self._time_machine = None
+        self._drift_sentinel = None
+        self._permission_gate = None
+        self._session_id: Optional[str] = None
+        self._project_id: Optional[str] = None
+
         # ── Build app with lifespan ───────────
         self.app = FastAPI(
             title="MCE — Model Context Engine",
             description="Token-aware transparent proxy for MCP servers",
-            version="0.1.0",
+            version="1.0.0",
             lifespan=self._lifespan,
         )
 
@@ -93,6 +103,9 @@ class ProxyServer:
 
         # Auto-discover tools from upstream servers
         await self._discover_upstream_tools()
+
+        # Initialize intelligence layer
+        await self._init_intelligence()
 
         # Warn if no upstream servers configured
         if not self.config.upstream_servers:
@@ -109,9 +122,164 @@ class ProxyServer:
 
         yield
 
-        # Shutdown
+        # Shutdown — extract session learnings
+        await self._shutdown_intelligence()
+
         await self.mcp_client.stop()
         _log.info("[mce.badge]\\[MCE][/mce.badge] Proxy shutting down")
+
+    async def _init_intelligence(self) -> None:
+        """Initialize the Meridian intelligence layer components."""
+        from utils.project import get_project_id, get_session_id, ensure_storage_dirs
+
+        self._project_id = get_project_id()
+        self._session_id = get_session_id()
+
+        storage_paths = ensure_storage_dirs(
+            self._project_id,
+            self._session_id,
+            self.config.memvault.storage_path,
+        )
+
+        # SessionLedger (CostWatch)
+        if self.config.cost_watch.enabled:
+            try:
+                from models.cost_store import CostStore
+                from engine.intelligence.session_ledger import SessionLedger
+
+                cost_store = CostStore(storage_paths["cost_db"])
+                await cost_store.connect()
+
+                self._session_ledger = SessionLedger(
+                    config=self.config.cost_watch,
+                    session_id=self._session_id,
+                    store=cost_store,
+                )
+                _log.info(
+                    "[mce.success]\\[CostWatch] Initialized[/mce.success] — "
+                    f"Session budget: ${self.config.cost_watch.session_budget_usd:.2f}"
+                )
+            except Exception as exc:
+                _log.warning(f"Failed to initialize SessionLedger: {exc}")
+
+        # MemVault
+        if self.config.memvault.enabled:
+            try:
+                from models.memory_store import MemoryStore
+                from engine.intelligence.memvault import MemVault
+
+                memory_store = MemoryStore(storage_paths["memory_db"])
+                await memory_store.connect()
+
+                self._memvault = MemVault(
+                    config=self.config.memvault,
+                    project_id=self._project_id,
+                    session_id=self._session_id,
+                    store=memory_store,
+                )
+
+                # Inject context from previous sessions
+                context = await self._memvault.inject_context()
+                mem_count = await self._memvault.get_memory_count()
+
+                self.context.memory_summary = {
+                    "memory_count": mem_count,
+                    "project_id": self._project_id[:8],
+                }
+
+                if context:
+                    _log.info(
+                        f"[mce.success]\\[MemVault] Loaded {mem_count} memories[/mce.success]"
+                    )
+                else:
+                    _log.info(
+                        "[mce.badge]\\[MemVault][/mce.badge] Initialized — "
+                        "no prior memories found"
+                    )
+            except Exception as exc:
+                _log.warning(f"Failed to initialize MemVault: {exc}")
+
+        # TimeMachine
+        if self.config.time_machine.enabled:
+            try:
+                from engine.intelligence.time_machine import TimeMachine
+
+                tm_db_path = storage_paths["session_dir"] / "timeline.db"
+                self._time_machine = TimeMachine(
+                    config=self.config.time_machine,
+                    session_id=self._session_id,
+                    db_path=tm_db_path,
+                )
+                await self._time_machine.connect()
+
+                self.context.timeline_summary = self._time_machine.get_timeline_summary()
+            except Exception as exc:
+                _log.warning(f"Failed to initialize TimeMachine: {exc}")
+
+        # DriftSentinel
+        if self.config.drift_sentinel.enabled:
+            try:
+                from engine.guardian.drift_sentinel import DriftSentinel
+
+                self._drift_sentinel = DriftSentinel(self.config.drift_sentinel)
+
+                # Load constraints from MemVault if available
+                if self._memvault is not None:
+                    count = await self._drift_sentinel.load_constraints_from_memvault(
+                        self._memvault
+                    )
+
+                self.context.guardian_summary = self._drift_sentinel.get_guardian_summary()
+                _log.info(
+                    f"[mce.success]\\[DriftSentinel] Initialized with "
+                    f"{self._drift_sentinel.constraint_count} constraints[/mce.success]"
+                )
+            except Exception as exc:
+                _log.warning(f"Failed to initialize DriftSentinel: {exc}")
+
+        # PermissionGate
+        try:
+            from engine.guardian.permission_gate import PermissionGate
+
+            self._permission_gate = PermissionGate(self.config.permission_profiles)
+            _log.info(
+                f"[mce.badge]\\[PermissionGate][/mce.badge] "
+                f"Active profile: {self._permission_gate.active_profile_name}"
+            )
+        except Exception as exc:
+            _log.warning(f"Failed to initialize PermissionGate: {exc}")
+
+    async def _shutdown_intelligence(self) -> None:
+        """Graceful shutdown: extract learnings, close DB connections."""
+        # Extract session learnings
+        if self._memvault is not None:
+            try:
+                memories = await self._memvault.extract_session_learnings()
+                _log.info(
+                    f"[mce.badge]\\[MemVault][/mce.badge] Session ended — "
+                    f"extracted {len(memories)} memories"
+                )
+            except Exception as exc:
+                _log.warning(f"MemVault extraction failed: {exc}")
+
+            try:
+                await self._memvault._store.close()
+            except Exception:
+                pass
+
+        # Close cost store
+        # Close TimeMachine
+        if self._time_machine is not None:
+            try:
+                await self._time_machine.close()
+            except Exception:
+                pass
+
+        if self._session_ledger is not None:
+            try:
+                await self._session_ledger._store.close()
+            except Exception:
+                pass
 
     async def _discover_upstream_tools(self) -> None:
         """Auto-discover tools from upstream servers and register them."""
@@ -162,7 +330,7 @@ class ProxyServer:
             return {
                 "status": "ok",
                 "engine": "MCE",
-                "version": "0.1.0",
+                "version": "1.0.0",
                 "stats": self.context.summary(),
             }
 
@@ -179,19 +347,22 @@ class ProxyServer:
         """
         Execute the full MCE pipeline for a single JSON-RPC request.
 
-        1. Handle meta-tools (discover_capabilities, tools/list)
-        2. Check semantic cache
-        3. Check policy engine (pre-execution on arguments)
-        4. Forward to upstream MCP server
-        5. Record in circuit breaker (with error status)
-        6. Check policy engine (post-execution on response)
-        7. Evaluate token budget
-        8. Squeeze if over budget
-        9. Cache the result
-        10. Return minified response
+        1.  Handle meta-tools (discover_capabilities, tools/list)
+        2.  Check semantic cache
+        3.  Check policy engine (pre-execution on arguments)
+        4.  Forward to upstream MCP server
+        5.  Record in circuit breaker (with error status)
+        6.  Check policy engine (post-execution on response)
+        7.  Evaluate token budget
+        8.  Squeeze if over budget
+        9.  Cache the result
+        10. Record context stats
+        11. Fire intelligence layer (SessionLedger + MemVault)
+        12. Return minified response
         """
         tool_name = request.method
         arguments = request.params or {}
+        call_start_time = time.monotonic()
 
         _log.info(f"[mce.badge]\\[MCE][/mce.badge] ← {tool_name}")
 
@@ -327,14 +498,104 @@ class ProxyServer:
         if self.config.cache.enabled:
             self.cache.put(tool_name, arguments, squeezed_result, squeezed_tokens)
 
-        # 10. Record and return
+        # 10. Record context stats
         self.context.record_request(
             tool_name=tool_name,
             raw_tokens=raw_tokens,
             squeezed_tokens=squeezed_tokens,
         )
 
+        # 11. Fire intelligence layer (non-blocking)
+        duration_ms = int((time.monotonic() - call_start_time) * 1000)
+        tokens_saved = raw_tokens - squeezed_tokens
+
+        asyncio.create_task(
+            self._fire_intelligence(
+                tool_name=tool_name,
+                arguments=arguments,
+                response=squeezed_result,
+                raw_tokens=raw_tokens,
+                squeezed_tokens=squeezed_tokens,
+                tokens_saved=tokens_saved,
+                duration_ms=duration_ms,
+            )
+        )
+
         return JsonRpcResponse(id=request.id, result=squeezed_result)
+
+    # ──────────────────────────────────────────
+    # Intelligence Layer (fire-and-forget)
+    # ──────────────────────────────────────────
+
+    async def _fire_intelligence(
+        self,
+        tool_name: str,
+        arguments: dict,
+        response: Any,
+        raw_tokens: int,
+        squeezed_tokens: int,
+        tokens_saved: int,
+        duration_ms: int,
+    ) -> None:
+        """
+        Fire intelligence layer hooks asynchronously.
+        This runs in the background and never blocks the response.
+        """
+        try:
+            # SessionLedger: record cost
+            if self._session_ledger is not None:
+                alerts = await self._session_ledger.record_exchange(
+                    tool_name=tool_name,
+                    tokens_in=raw_tokens,
+                    tokens_out=squeezed_tokens,
+                    tokens_saved=tokens_saved,
+                )
+                # Update context manager with cost summary
+                self.context.cost_summary = self._session_ledger.get_session_summary()
+
+            # MemVault: observe tool call
+            if self._memvault is not None:
+                await self._memvault.observe(
+                    tool_name=tool_name,
+                    arguments=arguments,
+                    response=response,
+                    tokens_in=raw_tokens,
+                    tokens_out=squeezed_tokens,
+                    duration_ms=duration_ms,
+                )
+                # Update memory count
+                mem_count = await self._memvault.get_memory_count()
+                self.context.memory_summary = {
+                    "memory_count": mem_count,
+                    "project_id": self._project_id[:8] if self._project_id else "",
+                }
+
+            # TimeMachine: auto-checkpoint
+            if self._time_machine is not None:
+                is_file_write = tool_name in (
+                    "write_file", "edit_file", "create_file",
+                    "replace_file_content", "multi_replace_file_content",
+                )
+                is_destructive = tool_name in (
+                    "execute_command", "run_command", "shell_exec",
+                    "delete_file", "rm",
+                )
+                self._time_machine.record_tool_call(
+                    tool_name=tool_name,
+                    arguments=arguments,
+                    tokens=raw_tokens + squeezed_tokens,
+                    is_file_write=is_file_write,
+                    is_destructive=is_destructive,
+                )
+                await self._time_machine.maybe_checkpoint(
+                    tool_name=tool_name,
+                    is_file_write=is_file_write,
+                    is_destructive=is_destructive,
+                )
+                self.context.timeline_summary = self._time_machine.get_timeline_summary()
+
+        except Exception as exc:
+            _log.debug(f"Intelligence layer error (non-critical): {exc}")
 
     # ──────────────────────────────────────────
     # Squeeze Pipeline

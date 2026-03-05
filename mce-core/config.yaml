@@ -68,3 +68,74 @@ embeddings:
 logging:
   level: "INFO"
   show_tokens: true
+
+# ─── MERIDIAN INTELLIGENCE LAYER (v1.0) ───────────────────────
+
+# MemVault — cross-session persistent memory
+memvault:
+  enabled: true
+  storage_path: "~/.mce/projects"
+  extraction_mode: "heuristic"       # "heuristic" | "ollama" | "api"
+  injection_token_budget: 500        # max tokens to inject per session
+  auto_update_claude_md: true
+  memory_types:
+    - decisions
+    - dead_ends
+    - constraints
+    - preferences
+    - file_patterns
+
+# CostWatch — real-time token cost monitoring
+cost_watch:
+  enabled: true
+  daily_budget_usd: 10.00
+  session_budget_usd: 3.00
+  alert_on_parallel_agents: true
+  token_rate_alert_per_min: 1000
+  model_costs:
+    claude-opus-4:    { input: 15.0, output: 75.0 }
+    claude-sonnet-4:  { input: 3.0,  output: 15.0 }
+    gpt-4o:           { input: 5.0,  output: 15.0 }
+
+# TimeMachine — session checkpointing & branching
+time_machine:
+  enabled: true
+  auto_checkpoint_interval_mins: 10
+  checkpoint_on_file_write: true
+  checkpoint_on_destructive_tool: true
+  max_checkpoints_per_session: 50
+  capture_file_diffs: true
+
+# DriftSentinel — constraint drift detection
+drift_sentinel:
+  enabled: true
+  alert_on_constraint_violation: true
+  block_on_critical_violation: true
+  load_constraints_from_memvault: true
+
+# PermissionGate — smart permission profiles
+permission_profiles:
+  active: "focused_work"
+  profiles:
+    exploration:
+      file_read: auto
+      file_write: prompt
+      shell_exec: prompt
+      destructive: block
+    focused_work:
+      file_read: auto
+      file_write: auto
+      shell_exec: prompt
+      destructive: prompt
+    review:
+      file_read: auto
+      file_write: prompt
+      shell_exec: prompt
+      destructive: block
+
+# SkillForge — team-shareable workflow packs
+skills:
+  enabled: true
+  path: ".mce/skills"
+  auto_trigger: true
+  team_sync_url: null

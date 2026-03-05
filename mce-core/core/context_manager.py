@@ -69,6 +69,15 @@ class ContextManager:
         self._recent_tools: list[dict] = []  # Last N tool calls for display
         self._lock = asyncio.Lock()
 
+        # Event callbacks — the proxy wires intelligence components here
+        self._on_request_callbacks: list = []  # list[Callable]
+
+        # Cost summary from SessionLedger (updated by proxy)
+        self._cost_summary: dict = {}
+        self._memory_summary: dict = {}
+        self._timeline_summary: dict = {}
+        self._guardian_summary: dict = {}
+
     @property
     def stats(self) -> SessionStats:
         return self._stats
@@ -76,6 +85,42 @@ class ContextManager:
     @property
     def recent_tools(self) -> list[dict]:
         return list(self._recent_tools[-20:])
+
+    @property
+    def cost_summary(self) -> dict:
+        return self._cost_summary
+
+    @cost_summary.setter
+    def cost_summary(self, value: dict) -> None:
+        self._cost_summary = value
+
+    @property
+    def memory_summary(self) -> dict:
+        return self._memory_summary
+
+    @memory_summary.setter
+    def memory_summary(self, value: dict) -> None:
+        self._memory_summary = value
+
+    @property
+    def timeline_summary(self) -> dict:
+        return self._timeline_summary
+
+    @timeline_summary.setter
+    def timeline_summary(self, value: dict) -> None:
+        self._timeline_summary = value
+
+    @property
+    def guardian_summary(self) -> dict:
+        return self._guardian_summary
+
+    @guardian_summary.setter
+    def guardian_summary(self, value: dict) -> None:
+        self._guardian_summary = value
+
+    def add_request_callback(self, callback) -> None:
+        """Register a callback to be called on every request recording."""
+        self._on_request_callbacks.append(callback)
 
     # ── Recording Events ──────────────────────
 
@@ -132,7 +177,7 @@ class ContextManager:
     def summary(self) -> dict:
         """Return a summary dict for serialization / TUI display."""
         s = self._stats
-        return {
+        result = {
             "total_requests": s.total_requests,
             "total_raw_tokens": s.total_raw_tokens,
             "total_squeezed_tokens": s.total_squeezed_tokens,
@@ -144,6 +189,16 @@ class ContextManager:
             "breaker_trips": s.breaker_trips,
             "uptime_seconds": round(s.uptime_seconds, 1),
         }
+        # Merge intelligence layer summaries
+        if self._cost_summary:
+            result["cost_watch"] = self._cost_summary
+        if self._memory_summary:
+            result["memory"] = self._memory_summary
+        if self._timeline_summary:
+            result["timeline"] = self._timeline_summary
+        if self._guardian_summary:
+            result["guardian"] = self._guardian_summary
+        return result
 
     def reset(self) -> None:
         """Reset all session stats."""
