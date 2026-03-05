@@ -1,0 +1,56 @@
+# ──────────────────────────────────────────────
+# MCE — .gitignore
+# ──────────────────────────────────────────────
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+*.egg
+dist/
+build/
+*.whl
+
+# Virtual environments
+venv/
+.venv/
+env/
+.env/
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Environment files
+.env
+.env.local
+*.env
+
+# Pytest
+.pytest_cache/
+htmlcov/
+.coverage
+
+# Sentence Transformers model cache (large)
+models_cache/
+
+# Logs
+*.log
+
+# OS files
+desktop.ini
+ehthumbs.db
+
+# MCE internal prompt files (not needed in repo)
+SYSTEM_PROMPT.MD
+AGENT_PROMT.MD
+
+# Gemini agent files
+.gemini/
